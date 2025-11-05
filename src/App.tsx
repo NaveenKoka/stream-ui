@@ -1,11 +1,13 @@
 import React, { useEffect, useState, useMemo } from "react";
 import "./index.css";
 import { PanelGroup, Panel, PanelResizeHandle } from "react-resizable-panels";
-import ChatList from "./components/ChatList";
+import Sidebar from "./components/Sidebar";
 import ChatPanel from "./components/ChatPanel";
 import { useChatStore } from "./hooks/useChatStore";
 import { useChatWebSocket } from "./hooks/useChatWebSocket";
 import EntityPanel from "./components/AdminLayout";
+import AppView from "./components/AppView";
+import UserView from "./components/UserView";
 import { useRef } from "react";
 
 // Helper function to parse JSON response
@@ -21,11 +23,13 @@ function parseResponse(content: string): { reply: string; type: "continue" | "ad
   return null;
 }
 
-function SettingsMenu({ dark, setDark, adminMode, setAdminMode }: {
+function SettingsMenu({ dark, setDark, adminMode, setAdminMode, userMode, setUserMode }: {
   dark: boolean;
   setDark: (d: boolean) => void;
   adminMode: boolean;
   setAdminMode: (a: boolean) => void;
+  userMode: boolean;
+  setUserMode: (u: boolean) => void;
 }) {
   const [open, setOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
@@ -67,10 +71,26 @@ function SettingsMenu({ dark, setDark, adminMode, setAdminMode }: {
             <span className="text-gray-700 dark:text-gray-200 font-medium">Admin Mode</span>
             <button
               className={`px-3 py-1 rounded-full border transition font-medium ${adminMode ? "bg-blue-600 text-white border-blue-700" : "bg-gray-100 dark:bg-gray-800 border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-200 hover:bg-gray-200 dark:hover:bg-gray-700"}`}
-              onClick={() => setAdminMode(!adminMode)}
+              onClick={() => {
+                setAdminMode(!adminMode);
+                if (userMode) setUserMode(false);
+              }}
               aria-label="Toggle admin mode"
             >
               {adminMode ? "On" : "Off"}
+            </button>
+          </div>
+          <div className="flex items-center justify-between">
+            <span className="text-gray-700 dark:text-gray-200 font-medium">User Mode</span>
+            <button
+              className={`px-3 py-1 rounded-full border transition font-medium ${userMode ? "bg-green-600 text-white border-green-700" : "bg-gray-100 dark:bg-gray-800 border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-200 hover:bg-gray-200 dark:hover:bg-gray-700"}`}
+              onClick={() => {
+                setUserMode(!userMode);
+                if (adminMode) setAdminMode(false);
+              }}
+              aria-label="Toggle user mode"
+            >
+              {userMode ? "On" : "Off"}
             </button>
           </div>
         </div>
@@ -84,7 +104,37 @@ function App() {
   const { sendMessage } = useChatWebSocket();
   const [dark, setDark] = useState(false);
   const [adminMode, setAdminMode] = useState(false);
+  const [userMode, setUserMode] = useState(false);
+  const [currentUserId, setCurrentUserId] = useState(1); // Default to user ID 1
   const [selectedObjectIndex, setSelectedObjectIndex] = useState(0);
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  const [selectedAppId, setSelectedAppId] = useState<number | null>(null);
+  const [previewSchema, setPreviewSchema] = useState<Record<string, unknown> | null>(null);
+
+  // Handle app selection
+  const handleAppSelect = (appId: number) => {
+    console.log("App selection triggered with appId:", appId);
+    console.log("Current selectedAppId before:", selectedAppId);
+    setSelectedAppId(appId);
+    console.log("selectedAppId state updated to:", appId);
+  };
+
+  // Handle clearing app selection (go back to chat view)
+  const handleClearAppSelection = () => {
+    setSelectedAppId(null);
+  };
+
+  // Handle app creation from modal
+  const handleAppCreated = (appId: number) => {
+    setSelectedAppId(appId);
+    console.log("Created and selected app:", appId);
+  };
+
+  // Handle preview schema
+  const handlePreviewSchema = (schema: Record<string, unknown>) => {
+    console.log("Preview schema requested:", schema);
+    setPreviewSchema(schema);
+  };
 
   // Extract metadata from the latest admin response in the current session
   // Extract metadata from the latest admin response in the current session
@@ -156,15 +206,31 @@ function App() {
   return (
     <div className="h-screen w-screen bg-gray-100 dark:bg-gray-900 font-sans relative">
       {/* Settings menu bottom left */}
-      <SettingsMenu dark={dark} setDark={setDark} adminMode={adminMode} setAdminMode={setAdminMode} />
-      <PanelGroup direction="horizontal">
-        <Panel defaultSize={18} minSize={12} maxSize={25}>
-          <ChatList sessions={sessions} currentId={currentId} onSelect={setCurrentId} />
-        </Panel>
-        <PanelResizeHandle className="w-px cursor-col-resize bg-gray-200 dark:bg-gray-800" />
-        <Panel defaultSize={50} minSize={30}>
-          <div className="h-full w-full border-r border-gray-200 dark:border-gray-800 bg-gray-50 dark:bg-gray-900 flex flex-col items-stretch justify-stretch">
-            {latestAdminResponse ? (
+      <SettingsMenu dark={dark} setDark={setDark} adminMode={adminMode} setAdminMode={setAdminMode} userMode={userMode} setUserMode={setUserMode} />
+      
+      {userMode ? (
+        /* Show User View when in user mode - takes over entire interface */
+        <UserView userId={currentUserId} isAdmin={adminMode} />
+      ) : (
+        /* Show Admin Interface */
+        <PanelGroup direction="horizontal">
+          <Panel defaultSize={16} minSize={10} maxSize={22}>
+            <Sidebar 
+              sessions={sessions} 
+              currentId={currentId} 
+              selectedAppId={selectedAppId}
+              onSelectChat={setCurrentId}
+              onSelectApp={handleAppSelect}
+            />
+          </Panel>
+          <PanelResizeHandle className="w-px cursor-col-resize bg-gray-200 dark:bg-gray-800" />
+          <Panel defaultSize={60} minSize={40}>
+            <div className="h-full w-full border-r border-gray-200 dark:border-gray-800 bg-gray-50 dark:bg-gray-900 flex flex-col items-stretch justify-stretch">
+              {selectedAppId ? (
+              /* Show App View when an app is selected */
+              <AppView appId={selectedAppId} adminMode={adminMode} onBack={handleClearAppSelection} />
+            ) : latestAdminResponse ? (
+              /* Show Admin Data when available */
               <>
                 {/* Tab bar for multiple objects */}
                 {hasObjects && (
@@ -213,17 +279,128 @@ function App() {
               <div className="flex items-center justify-center w-full h-full bg-white dark:bg-[#23232b]">
                 <div className="text-center text-gray-500 dark:text-gray-400">
                   <div className="text-lg font-semibold mb-2">No Admin Data Available</div>
-                  <div className="text-sm">Chat with the assistant to generate an admin interface</div>
+                  <div className="text-sm">Chat with the assistant to generate an admin interface or select an app from the sidebar</div>
                 </div>
               </div>
             )}
           </div>
         </Panel>
         <PanelResizeHandle className="w-px cursor-col-resize bg-gray-200 dark:bg-gray-800" />
-        <Panel defaultSize={32} minSize={20} maxSize={40}>
-          <ChatPanel session={currentSession} onSend={sendMessage} loading={loading} />
+        <Panel defaultSize={24} minSize={15} maxSize={35}>
+          <ChatPanel session={currentSession} onSend={sendMessage} loading={loading} onAppCreated={handleAppCreated} selectedAppId={selectedAppId} onPreviewSchema={handlePreviewSchema} />
         </Panel>
       </PanelGroup>
+      )}
+
+      {/* Preview Schema Modal */}
+      {previewSchema && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+          <div className="bg-white dark:bg-gray-800 rounded-lg p-6 w-full max-w-4xl mx-4 max-h-[90vh] overflow-y-auto">
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-lg font-semibold text-gray-900 dark:text-gray-100">Schema Preview</h3>
+              <button
+                onClick={() => setPreviewSchema(null)}
+                className="text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200"
+              >
+                ✕
+              </button>
+            </div>
+            
+            <div className="space-y-4">
+              {/* Objects Preview */}
+              {previewSchema.objects && (
+                <div>
+                  <h4 className="font-semibold text-gray-900 dark:text-gray-100 mb-3">Objects</h4>
+                  <div className="space-y-3">
+                                         {Object.entries(previewSchema.objects as Record<string, any>).map(([objectName, objectData]) => (
+                       <div key={objectName} className="border border-gray-200 dark:border-gray-700 rounded-md p-4">
+                         <h5 className="font-semibold text-gray-900 dark:text-gray-100 mb-2">{objectName}</h5>
+                         <div className="grid grid-cols-2 md:grid-cols-3 gap-2">
+                           {Object.entries(objectData.fields || {}).map(([fieldName, fieldType]) => {
+                             // Handle both simple string types and object types
+                             let displayType = 'unknown';
+                             if (typeof fieldType === 'string') {
+                               displayType = fieldType;
+                             } else if (typeof fieldType === 'object' && fieldType !== null) {
+                               displayType = (fieldType as any).type || JSON.stringify(fieldType);
+                             }
+                             
+                             return (
+                               <div key={fieldName} className="text-sm text-gray-600 dark:text-gray-400">
+                                 <span className="font-medium">{fieldName}:</span> <span className="text-blue-600 dark:text-blue-400">{displayType}</span>
+                               </div>
+                             );
+                           })}
+                         </div>
+                       </div>
+                     ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Workflows Preview */}
+              {previewSchema.workflows && (
+                <div>
+                  <h4 className="font-semibold text-gray-900 dark:text-gray-100 mb-3">Workflows</h4>
+                  <div className="space-y-3">
+                    {Object.entries(previewSchema.workflows as Record<string, any>).map(([workflowName, workflowData]) => (
+                      <div key={workflowName} className="border border-gray-200 dark:border-gray-700 rounded-md p-4">
+                        <h5 className="font-semibold text-gray-900 dark:text-gray-100 mb-2">{workflowName}</h5>
+                        <ol className="list-decimal list-inside space-y-1 text-sm text-gray-600 dark:text-gray-400">
+                          {(workflowData.steps || []).map((step: any, index: number) => (
+                            <li key={index}>{typeof step === 'string' ? step : step.name || `Step ${index + 1}`}</li>
+                          ))}
+                        </ol>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Raw JSON Preview */}
+              <div>
+                <h4 className="font-semibold text-gray-900 dark:text-gray-100 mb-3">Raw Schema (JSON)</h4>
+                <pre className="bg-gray-50 dark:bg-gray-900 p-4 rounded-md text-xs text-gray-600 dark:text-gray-400 overflow-x-auto">
+                  {JSON.stringify(previewSchema, null, 2)}
+                </pre>
+              </div>
+            </div>
+
+            <div className="flex justify-end space-x-3 mt-6 pt-4 border-t border-gray-200 dark:border-gray-700">
+              <button
+                onClick={() => setPreviewSchema(null)}
+                className="px-4 py-2 text-gray-700 dark:text-gray-300 border border-gray-300 dark:border-gray-600 rounded-md hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors"
+              >
+                Close
+              </button>
+              <button
+                onClick={async () => {
+                  // Save schema to backend
+                  try {
+                    const response = await fetch('http://localhost:8000/save-schema', {
+                      method: 'POST',
+                      headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({ ...previewSchema, app_id: selectedAppId })
+                    });
+                    if (response.ok) {
+                      alert('Schema saved successfully!');
+                      setPreviewSchema(null);
+                    } else {
+                      alert('Failed to save schema');
+                    }
+                  } catch (error) {
+                    console.error('Error saving schema:', error);
+                    alert('Error saving schema');
+                  }
+                }}
+                className="px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 transition-colors"
+              >
+                Save Schema
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

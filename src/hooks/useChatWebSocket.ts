@@ -1,84 +1,284 @@
-import { useEffect, useRef } from "react";
-import { useChatStore } from "./useChatStore";
-import type { Message } from "../types";
+import { useState, useEffect, useRef } from 'react';
 
-export function useChatWebSocket() {
-  const ws = useRef<WebSocket | null>(null);
-  const { sessions, currentId, setSessions, setLoading } = useChatStore();
+interface Message {
+  id: string;
+  sender: "user" | "assistant";
+  content: string;
+  timestamp: number;
+  parsedResponse?: {
+    reply: string;
+    type: "continue" | "admin" | "user";
+    config?: Record<string, unknown>;
+  };
+}
 
-  useEffect(() => {
-    ws.current = new WebSocket("ws://localhost:8000/ws/chat");
-    ws.current.onclose = () => console.log("WebSocket closed");
-    return () => ws.current?.close();
-  }, []);
+interface ChatWebSocketProps {
+  onNewAppCreated?: (appData: unknown) => void;
+  onWorkflowsUpdated?: (workflows: unknown[]) => void;
+  onObjectsUpdated?: (objects: unknown[]) => void;
+  onLayoutGenerated?: (layout: unknown) => void;
+}
 
-  const sendMessage = (msg: string) => {
-    const newMsg: Message = {
-      id: Math.random().toString(36).slice(2),
-      sender: "user",
-      content: msg,
-      timestamp: Date.now(),
-    };
-    setSessions((prevSessions) =>
-      prevSessions.map((s) =>
-        s.id === currentId ? { ...s, messages: [...s.messages, newMsg] } : s
-      )
-    );
-    setLoading(true);
+export const useChatWebSocket = ({ 
+  onNewAppCreated, 
+  onWorkflowsUpdated, 
+  onObjectsUpdated, 
+  onLayoutGenerated 
+}: ChatWebSocketProps = {}) => {
+  const [messages, setMessages] = useState<Message[]>([]);
+  const [isConnected, setIsConnected] = useState(false);
+  const [isLoading, setIsLoading] = useState(false);
+  const wsRef = useRef<WebSocket | null>(null);
+  const currentMessageRef = useRef<string>('');
+  const currentAssistantMessageRef = useRef<Message | null>(null);
+  const reconnectTimeoutRef = useRef<number | null>(null);
+  const lastProcessedResponseRef = useRef<string>('');
+  const responseCompletedRef = useRef<boolean>(false);
 
-    // Prepare context data
-    const currentSession = sessions.find(s => s.id === currentId);
-    const context = {
-      session_id: currentId,
-      message_count: currentSession?.messages.length || 0,
-      user_attributes: {
-        // Add any user-specific data here
-        last_activity: Date.now(),
-        session_start: currentSession?.createdAt || Date.now()
+  const connect = () => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      console.log('WebSocket already connected');
+      return;
+    }
+
+    console.log('Connecting to WebSocket...');
+    const ws = new WebSocket('ws://localhost:8000/ws/chat');
+    wsRef.current = ws;
+
+    ws.onopen = () => {
+      setIsConnected(true);
+      console.log('WebSocket connected successfully');
+      // Clear any reconnect timeout
+      if (reconnectTimeoutRef.current) {
+        clearTimeout(reconnectTimeoutRef.current);
+        reconnectTimeoutRef.current = null;
       }
     };
 
-    // Map messages to OpenAI format
-    const mappedMessages = (currentSession?.messages ? [...currentSession.messages, newMsg] : [newMsg])
-      .map(m => ({
-        role: m.sender === "user" ? "user" : "assistant",
-        content: m.content
-      }));
-    const messageWithContext = {
-      messages: mappedMessages,
-      context: context
+    ws.onmessage = (event) => {
+      const data = event.data;
+      console.log('WebSocket received chunk:', data);
+      
+      // Handle streaming response chunks
+      handleStreamingMessage(data);
     };
 
-    ws.current?.send(JSON.stringify(messageWithContext));
-
-    // Prepare to receive streaming response
-    const assistantMsg: Message = {
-      id: Math.random().toString(36).slice(2),
-      sender: "assistant",
-      content: "",
-      timestamp: Date.now(),
+    ws.onclose = (event) => {
+      setIsConnected(false);
+      console.log('WebSocket disconnected:', event.code, event.reason);
+      
+      // Don't reconnect if it was a normal closure
+      if (event.code !== 1000) {
+        console.log('Attempting to reconnect in 3 seconds...');
+        reconnectTimeoutRef.current = setTimeout(() => {
+          connect();
+        }, 3000);
+      }
     };
-    setSessions((prevSessions) =>
-      prevSessions.map((s) =>
-        s.id === currentId ? { ...s, messages: [...s.messages, assistantMsg] } : s
-      )
-    );
 
-    ws.current!.onmessage = (event) => {
-      setSessions((prevSessions) =>
-        prevSessions.map((s) => {
-          if (s.id !== currentId) return s;
-          const msgs = [...s.messages];
-          msgs[msgs.length - 1] = {
-            ...msgs[msgs.length - 1],
-            content: msgs[msgs.length - 1].content + event.data,
-          };
-          return { ...s, messages: msgs };
-        })
-      );
-      setLoading(false);
+    ws.onerror = (error) => {
+      console.error('WebSocket error:', error);
+      setIsConnected(false);
     };
   };
 
-  return { sendMessage };
-} 
+  const handleAdminResponse = (response: unknown) => {
+    console.log('Admin response received:', response);
+    
+    // Extract generated data from config
+    const config = (response as any).config;
+    
+    if (config?.objects && onObjectsUpdated) {
+      console.log('Processing objects from admin response');
+      // Convert objects to the format expected by the UI
+      const objects = Object.entries(config.objects).map(([name, data]: [string, unknown]) => ({
+        id: Date.now() + Math.random(), // Generate unique ID
+        name,
+        fields: (data as any).fields || {},
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString()
+      }));
+      
+      onObjectsUpdated(objects);
+    }
+    
+    if (config?.workflows && onWorkflowsUpdated) {
+      console.log('Processing workflows from admin response');
+      // Convert workflows to the format expected by the UI
+      const workflows = Object.entries(config.workflows).map(([name, data]: [string, unknown]) => ({
+        id: Date.now() + Math.random(), // Generate unique ID
+        name,
+        steps: (data as any).steps || [],
+        app_id: config.app_id || 1,
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+        description: (data as any).description || '',
+        status: 'draft'
+      }));
+      
+      onWorkflowsUpdated(workflows);
+    }
+    
+    if (config?.layout && onLayoutGenerated) {
+      console.log('Processing layout from admin response');
+      onLayoutGenerated(config.layout);
+    }
+    
+    // Do NOT add the admin response to messages here. Only update the last assistant message in the streaming handler.
+    setIsLoading(false);
+    currentAssistantMessageRef.current = null;
+  };
+
+  const handleStreamingMessage = (chunk: string) => {
+    // Skip if response is already completed
+    if (responseCompletedRef.current) {
+      return;
+    }
+
+    // Handle streaming response chunks
+    currentMessageRef.current += chunk;
+
+    // Only create a new assistant message if there is not one in progress
+    if (!currentAssistantMessageRef.current) {
+      currentAssistantMessageRef.current = {
+        id: Date.now().toString(),
+        sender: 'assistant',
+        content: currentMessageRef.current,
+        timestamp: Date.now()
+      };
+      setMessages(prev => [...prev, currentAssistantMessageRef.current!]);
+    } else {
+      // Always update the last assistant message
+      currentAssistantMessageRef.current.content = currentMessageRef.current;
+      setMessages(prev => {
+        const newMessages = [...prev];
+        const lastMessage = newMessages[newMessages.length - 1];
+        if (lastMessage && lastMessage.sender === 'assistant') {
+          lastMessage.content = currentMessageRef.current;
+        }
+        return newMessages;
+      });
+    }
+
+    // Try to parse the entire content as JSON
+    try {
+      console.log('Trying to parse:', currentMessageRef.current);
+      const parsed = JSON.parse(currentMessageRef.current.trim());
+      if (parsed.type && parsed.reply) {
+        // Check if we've already processed this exact response
+        const responseKey = JSON.stringify(parsed);
+        if (lastProcessedResponseRef.current === responseKey) {
+          return;
+        }
+        lastProcessedResponseRef.current = responseKey;
+        responseCompletedRef.current = true;
+        // Update the last assistant message with parsedResponse and summary
+        setMessages(prev => {
+          const newMessages = [...prev];
+          const lastMessage = newMessages[newMessages.length - 1];
+          if (lastMessage && lastMessage.sender === 'assistant') {
+            lastMessage.parsedResponse = parsed;
+            lastMessage.content = parsed.reply;
+          }
+          return newMessages;
+        });
+        if (currentAssistantMessageRef.current) {
+          currentAssistantMessageRef.current.parsedResponse = parsed;
+          currentAssistantMessageRef.current.content = parsed.reply;
+          currentMessageRef.current = parsed.reply;
+        }
+        // Handle admin responses only once
+        if (parsed.type === 'admin') {
+          handleAdminResponse(parsed);
+        } else {
+          setIsLoading(false);
+          currentAssistantMessageRef.current = null;
+        }
+        return;
+      }
+    } catch (e) {
+      // Not valid JSON yet, continue streaming
+    }
+    // If we have a lot of content but no valid JSON, assume it's a regular message
+    if (currentMessageRef.current.length > 10000) {
+      setIsLoading(false);
+      currentAssistantMessageRef.current = null;
+      responseCompletedRef.current = true;
+    }
+  };
+
+  const sendMessage = (content: string) => {
+    if (!wsRef.current || !isConnected) {
+      console.error('WebSocket not connected');
+      return;
+    }
+
+    const message: Message = {
+      id: Date.now().toString(),
+      sender: 'user',
+      content,
+      timestamp: Date.now()
+    };
+
+    setMessages(prev => [...prev, message]);
+    setIsLoading(true);
+    currentMessageRef.current = '';
+    currentAssistantMessageRef.current = null;
+    responseCompletedRef.current = false; // Reset the flag for new message
+
+    // Send message to WebSocket in the format the backend expects
+    const wsMessage = {
+      messages: [
+        {
+          role: "user",
+          content: content
+        }
+      ],
+      context: {
+        session_id: 'default'
+      }
+    };
+
+    console.log('Sending WebSocket message:', wsMessage);
+    wsRef.current.send(JSON.stringify(wsMessage));
+  };
+
+  const disconnect = () => {
+    if (wsRef.current) {
+      wsRef.current.close();
+    }
+    if (reconnectTimeoutRef.current) {
+      clearTimeout(reconnectTimeoutRef.current);
+      reconnectTimeoutRef.current = null;
+    }
+  };
+
+  useEffect(() => {
+    connect();
+    return () => {
+      disconnect();
+    };
+  }, []);
+
+  // Add timeout to prevent infinite loading
+  useEffect(() => {
+    if (isLoading) {
+      const timeout = setTimeout(() => {
+        console.log('WebSocket response timeout - stopping loading state');
+        setIsLoading(false);
+        currentAssistantMessageRef.current = null;
+      }, 30000); // 30 second timeout
+
+      return () => clearTimeout(timeout);
+    }
+  }, [isLoading]);
+
+  return {
+    messages,
+    isConnected,
+    isLoading,
+    sendMessage,
+    connect,
+    disconnect
+  };
+}; 
